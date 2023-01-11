@@ -1,0 +1,381 @@
+"""
+4 algorithm-types to run: van Hees, Random Forest, MESA_DL and legacy
+2 final rules to run all necessary data: final_performance and run_bland_altman
+"""
+import os
+import os.path as op
+import glob
+from dotenv import load_dotenv
+
+configfile: "config.yaml"
+
+# Read .env with ACTIHEALTH_LOCAL needed by RandomForestSleep2021Pipeline
+load_dotenv()
+
+# Fail if the below variables are not defined
+envvars:
+    "ACTIHEALTH_LOCAL",
+
+
+# CONFIG PATHS
+DATASET = config["dataset_name"]
+# Override `dataset_dir` form config.yaml if requested
+DATASET_DIR = (op.join(
+    os.getenv("ACTIHEALTH_LOCAL"), "datasets") if config["use_actihealth_datasets"] else config["dataset_dir"])
+ROOT_OUT_DIR = config["root_out_dir"]
+OUTPUT_DIR = op.join(ROOT_OUT_DIR, DATASET)
+LOG_DIR = config["log_dir"]
+
+
+# CONFIG ALGORITHM PARAMETERS
+VH_TIME_INTERVAL = config["vh_time_interval"]
+VH_ANGLE_THRES = config["vh_angle_thres"]
+VH_TIME_THRES = config["vh_time_thres_min"]
+
+vh_prms = f"_{VH_ANGLE_THRES}ang_{VH_TIME_THRES}time"
+
+DL_NN_TYPE = config["dl_nn_type"]
+DL_SEQ_LEN = config["dl_seq_len"]
+DL_cols = config["dl_cols"]
+DL_root = config["dl_root"]
+DANN_MODEL_NAMES = config["dann_model_names"]
+
+
+# CONFIG FILE and ALGORITHM NAMES
+FILES_IN = sorted(glob.glob(op.join(DATASET_DIR, DATASET,"*.h5")))
+FILES = [f.split("/")[-1].replace(".h5", "") for f in FILES_IN]
+ALGOS = ["legacy_algos_palotti", "RF", f"vh2015{vh_prms}",
+         "DL_MESA", "MESA_DANN"]
+
+
+#########
+# RULES #
+#########
+# It easier to read if the rules are in reverse-DAG order,
+# i.e. downstream (final) rules first, upstream (pulling data/preprocessing) last
+#########
+rule all:
+    input:
+        output_waso = f"{OUTPUT_DIR}/bland_altman_stats_waso.csv",
+        output_se = f"{OUTPUT_DIR}/bland_altman_stats_se.csv",
+        output_tst = f"{OUTPUT_DIR}/bland_altman_stats_tst.csv",
+        mean = f"{OUTPUT_DIR}/performance_mean_ALL_ALGOS.csv",
+        std = f"{OUTPUT_DIR}/performance_std_ALL_ALGOS.csv",
+
+
+rule run_bland_altman:
+    input:
+        fname=f"{OUTPUT_DIR}/performance_perfile_all_algos.csv",
+    output:
+        output_waso=f"{OUTPUT_DIR}/bland_altman_stats_waso.csv",
+        output_se=f"{OUTPUT_DIR}/bland_altman_stats_se.csv",
+        output_tst=f"{OUTPUT_DIR}/bland_altman_stats_tst.csv",
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/bland_altman.log"
+    script:
+        "scripts/bland_altman_stats.py"
+
+
+rule combine_perfile_results:
+    input:
+        expand(f"{OUTPUT_DIR}/performance_perfile_{{algo}}.csv", algo=ALGOS)
+    output:
+        f"{OUTPUT_DIR}/performance_perfile_all_algos.csv",
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/performance_perfile_all_algos.log"
+    script:
+        "scripts/combine_perfile_results.py"
+
+
+rule final_performance:
+    input:
+        files_in=expand(f"{OUTPUT_DIR}/performance_perfile_{{algo}}.csv", algo=ALGOS),
+    output:
+        mean=f"{OUTPUT_DIR}/performance_mean_ALL_ALGOS.csv",
+        std=f"{OUTPUT_DIR}/performance_std_ALL_ALGOS.csv",
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/performance_mean_and_std.log"
+    script:
+        "scripts/merge_results.py"
+
+
+rule performance_sbj_all_script:
+    input:
+        files=lambda wildcards: expand(f"{OUTPUT_DIR}/perf/{wildcards.nick}/{{file}}.csv", file=FILES)
+    output:
+        f"{OUTPUT_DIR}/performance_perfile_{{nick}}.csv",
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/performance_perfile_{{nick}}.log"
+    script:
+        "scripts/concat_performance.py"
+
+
+################
+# CALC METRICS #
+################
+# Performance by subject based on Newcastle true labels
+rule perf_by_subject:
+    input:
+        f"{OUTPUT_DIR}/endpoint/{{algo}}/{{file}}.csv",
+    output:
+        f"{OUTPUT_DIR}/perf/{{algo}}/{{file}}.csv",
+    params:
+        lab_col="sleepstate",
+        pred_col_prefx="is_sleep",
+        ncount_2_sleep=lambda wildcards: 6 if "vh2015" in wildcards.algo else 1,
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/perf/{{algo}}/{{file}}.log"
+    script:
+        "scripts/calc_metrics.py"
+
+
+####################
+# APPLY ALGORITHMS #
+####################
+rule VH2015:
+    input:
+        files=f"{DATASET_DIR}/{DATASET}/{{file}}.h5"
+    output:
+        f"{OUTPUT_DIR}/endpoint/vh2015{vh_prms}/{{file}}.csv"
+    params:
+        vh_time_interval=VH_TIME_INTERVAL,
+        vh_angle_thres=VH_ANGLE_THRES,
+        vh_time_thres=VH_TIME_THRES,
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/endpoint/vh2015{vh_prms}/{{file}}.log"
+    script:
+        "scripts/calc_algo_VH2015.py"
+
+
+rule RF:
+    input:
+        files_in=FILES_IN,
+    output:
+        expand(f"{OUTPUT_DIR}/endpoint/RF/{{file}}.csv", file=FILES)
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/endpoint/RF/all.log"
+    script:
+        'scripts/calc_algo_RF.py'
+
+
+rule MESA_DL:
+    input:
+        file_in=f"{OUTPUT_DIR}/COUNTS_30sec/counts_30_all.csv",
+    output:
+        expand(f"{OUTPUT_DIR}/endpoint/DL_MESA/{{file}}.csv", file=FILES)
+    params:
+        NN_TYPE=DL_NN_TYPE,
+        SEQ_LEN=DL_SEQ_LEN,
+        DL_cols=DL_cols,
+        DL_root=DL_root,
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/endpoint/DL_MESA/all.log"
+    script:
+        "scripts/calc_algos_DL_MESA.py"
+
+
+rule MESA_DANN:
+    input:
+        file_in=f"{OUTPUT_DIR}/COUNTS_30sec/counts_30_all.csv",
+        fname_models=expand("models/{name}", name=DANN_MODEL_NAMES),
+        scaler_file="models/scaler_NN_MESA",
+    output:
+        expand(f"{OUTPUT_DIR}/endpoint/MESA_DANN/{{file}}.csv", file=FILES)
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/endpoint/DL_MESA/all.log"
+    script:
+        "scripts/calc_algos_DL_MESA_scaler.py"
+
+
+rule LEGACY:
+    input:
+        file_in=f"{OUTPUT_DIR}/COUNTS_JOINED_PSG/{{file}}.csv",
+    output:
+        f"{OUTPUT_DIR}/endpoint/legacy_algos_v2/{{file}}.csv"
+    params:
+        path_out=f"{OUTPUT_DIR}/ALGOS_LEGACY_v2",
+        algo_name="cole,sazonov,sadeh,oakley80",
+        col="zcounts",
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/endpoint/legacy_algos_v2/{{file}}.log"
+    script:
+        "scripts/calc_algos_legacy_v2.py"
+
+
+######################
+# DATA PREPROCESSING #
+######################
+rule concat_cnts_30s_all:
+    input:
+        files=expand(f"{OUTPUT_DIR}/COUNTS_30sec/{{file}}.h5", file=FILES),
+    output:
+        f"{OUTPUT_DIR}/COUNTS_30sec/counts_30_all.csv",
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/COUNTS_30sec/counts_30_all.log"
+    script:
+        "scripts/concat_counts.py"
+
+
+rule concat_cnts_30s:
+    input:
+        files=f"{OUTPUT_DIR}/COUNTS_30sec/{{file}}.h5",
+    output:
+        f"{OUTPUT_DIR}/COUNTS_JOINED_PSG/{{file}}.csv",
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/COUNTS_JOINED_PSG/{{file}}.log"
+    script:
+        "scripts/concat_counts.py"
+
+
+rule do_activity_counts:
+    input:
+        data_pulled_check="data_pulled",
+        files=f"{DATASET_DIR}/{DATASET}/{{file}}.h5",
+    output:
+        f"{OUTPUT_DIR}/COUNTS_{{epoch_size}}sec/{{file}}.h5",
+    params:
+        epoch_len=lambda wildcards: wildcards.epoch_size
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/COUNTS_{{epoch_size}}sec/{{file}}.log"
+    script:
+        "scripts/calc_counts.py"
+
+
+# Make sure all data / ML models are downloaded
+# before running do_activity_counts rule.
+#
+# If you already have all the DVC data downloaded,
+# you may set SKIP_DVC_CHECKS=1 in your .env
+# so that the following check (that takes a few minutes) will be skipped.
+rule pull_data:
+    output: touch("data_pulled")
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/pull_data.log"
+    script:
+        "scripts/pull_data.py"
+
+
+#############
+# AUX RULES #
+#############
+rule plot_palotti:
+    input:
+        h5_files=f"{OUTPUT_DIR}/COUNTS_30sec/{{file}}.h5",
+        binary_files=f"{OUTPUT_DIR}/endpoint/legacy_algos_palotti/{{file}}.csv",
+    output:
+        f"{OUTPUT_DIR}/PALOTTI_PLOTS/{{file}}.png",
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/PALOTTI_PLOTS/{{file}}.log"
+    script:
+        "scripts/plot_palotti.py"
+
+
+rule plot_palotti_all:
+    input:
+        expand(f"{OUTPUT_DIR}/PALOTTI_PLOTS/{{file}}.png", file=FILES)
+
+
+rule plot_AUC_CM:
+    input:
+        file_in=f"{OUTPUT_DIR}/COUNTS_30sec/counts_30_all.csv",
+        MESA_data='data/MESA_100_xtrain_xval_xtest_ytrain_yval_ytest.gz',
+        fname_models=expand("models/{name}",name=DANN_MODEL_NAMES),
+        scaler_file="models/scaler_NN_MESA",
+    output:
+        folder=directory(f"{OUTPUT_DIR}/figures_AUC"),
+        plots=expand(
+            f"{OUTPUT_DIR}/figures_AUC/{{_type}}_{{name}}.png",
+            _type=["NC", "MESA"],
+            name=DANN_MODEL_NAMES
+        )
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/figures_AUC.log"
+    script:
+        "scripts/plot_CM_ROC.py"
+
+
+rule plot_PN:
+    input:
+        file_in = f"{OUTPUT_DIR}/COUNTS_30sec/counts_30_all.csv",
+        MESA_data='data/MESA_100_xtrain_xval_xtest_ytrain_yval_ytest.gz',
+        fname_models=expand("models/{name}",name=DANN_MODEL_NAMES),
+        scaler_file="models/scaler_NN_MESA",
+    output:
+        folder=directory(f"{OUTPUT_DIR}/figures_PN")
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/figures_PN.log"
+    script:
+        "scripts/plot_PN.py"
+
+
+rule plot_DL_history:
+    input:
+        fname_models = expand("models/{name}",name=DANN_MODEL_NAMES),
+    output:
+        folder=directory(f"{OUTPUT_DIR}/figures_Dl_history"),
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/figures_Dl_history.log"
+    script:
+        "scripts/plot_DL_history.py"
+
+
+# Performance based on MESA test set true labels
+rule cal_MESA_metrics:
+    input:
+        fname_models = expand("models/{name}",name=DANN_MODEL_NAMES),
+    output:
+        f"{OUTPUT_DIR}/performance_mean_ALL_ALGOS_MESA.csv"
+    conda:
+        "environment.yml"
+    log:
+        f"{LOG_DIR}/performance_mean_ALL_ALGOS_MESA.log"
+    script:
+        "scripts/calc_metrics_MESA.py"
+
+
+rule run_extras:
+    input:
+        expand(f"{OUTPUT_DIR}/{{name}}",
+            name=[
+                "performance_mean_ALL_ALGOS_MESA.csv",
+                "figures_AUC",
+                "figures_PN",
+                "figures_Dl_history",
+            ]
+        )

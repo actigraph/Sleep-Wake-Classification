@@ -1,0 +1,14 @@
+name: snake_sleep
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.9
+  - pytest
+  - snakemake-minimal
+  - pip
+  - pip:
+      - git+ssh://git@github.com/actigraph/actihealth.git@8edbe259570eacd6208ae8bf7912ae127ad65327
+      - python-dotenv
+  - tensorflow=2.10

@@ -1,0 +1,17 @@
+dataset_dir: "test_data"
+use_actihealth_datasets: true
+dataset_name: "PSGonly_10minpadded_Newcastle_2015"
+root_out_dir: "outputs"
+log_dir: "logs"
+vh_time_interval: 30
+vh_angle_thres: 5
+vh_time_thres_min: 5
+dl_nn_type: "CNN,LSTM"
+dl_seq_len: "100,50,20"
+dl_cols: "xcounts,ycounts,zcounts"
+dl_root: 6
+dann_model_names:
+  - DACNN_past_25+25
+  - noDACNN_past_25+25
+  - noDACNN_past_25+1
+  - DACNN_past_25+1
