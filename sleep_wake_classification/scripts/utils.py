@@ -29,9 +29,6 @@ def get_psg_downsampled(reading, time_interval=30, binary_class=True):
     return psg_results
 
 
-##################################
-# Below adapted from palotti
-##################################
 def extract_x_y(df, seq_len, subjid):
     df = df[df["subjid"] == subjid][["activity", "psg"]].copy()
     y = df.pop("psg")
